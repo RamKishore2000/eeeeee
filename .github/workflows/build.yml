@@ -1,117 +1,81 @@
-name: CI - Android
-
 on:
   push:
     branches:
-      - main
+      - master
   pull_request:
     branches:
-      - main
+      - master
+
+name: R-CMD-check
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  R-CMD-check:
+    runs-on: ${{ matrix.config.os }}
 
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: windows-latest, r: 'release'}
+          - {os: macOS-latest, r: 'release'}
+          - {os: ubuntu-20.04, r: 'release', rspm: "https://packagemanager.rstudio.com/cran/__linux__/focal/latest"}
+          - {os: ubuntu-20.04, r: 'devel', rspm: "https://packagemanager.rstudio.com/cran/__linux__/focal/latest"}
+
+    env:
+      R_REMOTES_NO_ERRORS_FROM_WARNINGS: true
+      RSPM: ${{ matrix.config.rspm }}
+    
+   defaults:
+      run:
+        working-directory: myfunctionname
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v2
 
-      # Used to cache dependencies with a timeout
-      - name: Get Date
-        id: get-date
+      - uses: r-lib/actions/setup-r@master
+        with:
+          r-version: ${{ matrix.config.r }}
+
+      - uses: r-lib/actions/setup-pandoc@master
+
+      - name: Query dependencies
         run: |
-          echo "date=$(date -u '+%Y%m%d')" >> $GITHUB_ENV
-        shell: bash
+          install.packages('remotes')
+          saveRDS(remotes::dev_package_deps(dependencies = TRUE), "../.github/depends.Rds", version = 2)
+          writeLines(sprintf("R-%i.%i", getRversion()$major, getRversion()$minor), "../.github/R-version")
+        shell: Rscript {0}
 
-      - name: Cache Buildozer global directory
-        uses: actions/cache@v3
+      - name: Cache R packages
+        if: runner.os != 'Windows'
+        uses: actions/cache@v1
         with:
-          path: .buildozer_global
-          key: buildozer-global-${{ hashFiles('buildozer.spec') }}
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-${{ hashFiles('.github/R-version') }}-1-${{ hashFiles('../.github/depends.Rds') }}
+          restore-keys: ${{ runner.os }}-${{ hashFiles('../.github/R-version') }}-1-
 
-      - uses: actions/cache@v3
-        with:
-          path: .buildozer
-          key: ${{ runner.os }}-${{ steps.get-date.outputs.date }}-${{ hashFiles('buildozer.spec') }}
-
-      # Install dependencies
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          while read -r cmd
+          do
+            eval sudo $cmd
+          done < <(Rscript -e 'cat(remotes::system_requirements("ubuntu", "20.04"), sep = "\n")')
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt-get install -y \
-            build-essential \
-            git \
-            ffmpeg \
-            libsdl2-dev \
-            libsdl2-image-dev \
-            libsdl2-mixer-dev \
-            libsdl2-ttf-dev \
-            libportmidi-dev \
-            libswscale-dev \
-            libavformat-dev \
-            libavcodec-dev \
-            libunwind-dev \
-            zlib1g-dev
-          sudo apt-get install -y \
-            libsqlite3-dev \
-            sqlite3 \
-            bzip2 \
-            libbz2-dev \
-            zlib1g-dev \
-            openssl \
-            libgdbm-dev \
-            libgdbm-compat-dev \
-            liblzma-dev \
-            libreadline-dev \
-            uuid-dev \
-            libgstreamer1.0 \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good
-          sudo apt-get install -y \
-            zip \
-            unzip \
-            autoconf \
-            libtool \
-            pkg-config \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libtinfo5 \
-            cmake \
-            libffi-dev \
-            libssl-dev \
-            automake
+          remotes::install_deps(dependencies = TRUE)
+          remotes::install_cran("rcmdcheck")
+        shell: Rscript {0}
 
-      # Set up Java 17 required by Gradle
-      - name: Setup Java 17 required by Gradle
-        uses: actions/setup-java@v4
+      - name: Check
+        env:
+          _R_CHECK_CRAN_INCOMING_REMOTE_: false
+        run: rcmdcheck::rcmdcheck(args = c("--no-manual", "--as-cran"), error_on = "warning", check_dir = "check")
+        shell: Rscript {0}
+
+      - name: Upload check results
+        if: failure()
+        uses: actions/upload-artifact@main
         with:
-          distribution: 'temurin'  # or 'zulu', 'liberica', etc.
-          java-version: '17'
-
-      # Set up Python
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.8' #set your python version
-
-      # Install pip dependencies
-      - name: Install pip dependencies
-        run: |
-          pip install --upgrade pip
-          pip install buildozer cython==0.29.33
-
-      # Build with Buildozer
-      - name: Build with Buildozer
-        id: buildozer
-        run: |
-          yes | buildozer -v android debug
-        # yes | buildozer -v android release
-        # run this for generating aab (Android App Bundle) [Required by google play]
-
-      # Upload artifacts
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: package
-          path: |
-            bin/*.apk
-            bin/*.aab
+          name: ${{ runner.os }}-r${{ matrix.config.r }}-results
+          path: check
